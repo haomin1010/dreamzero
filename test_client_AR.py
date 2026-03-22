@@ -185,6 +185,7 @@ def test_ar_droid_policy_server(
     num_chunks: int = 15,
     prompt: str = "Move the pan forward and use the brush in the middle of the plates to brush the inside of the pan",
     use_zero_images: bool = False,
+    output_dir: str = "debug_output",
 ):
     """Test the AR_droid policy server with roboarena interface.
 
@@ -250,6 +251,10 @@ def test_ar_droid_policy_server(
     for i, indices in enumerate(chunks):
         logging.info(f"  Chunk {i}: {indices}")
 
+    # Prepare output directory for saving actions
+    os.makedirs(output_dir, exist_ok=True)
+    all_actions: list[np.ndarray] = []
+
     # Step 0: initial single frame
     logging.info("=== Initial: frame [0] ===")
     obs = _make_obs_from_video(camera_frames, [0], prompt, session_id)
@@ -257,6 +262,8 @@ def test_ar_droid_policy_server(
     actions = client.infer(obs)
     dt = time.time() - t0
     _log_action(actions, dt)
+    np.save(os.path.join(output_dir, "actions_initial.npy"), actions)
+    all_actions.append(actions)
 
     # Subsequent chunks: send 4 frames at a time
     for chunk_idx, frame_indices in enumerate(chunks):
@@ -266,6 +273,12 @@ def test_ar_droid_policy_server(
         actions = client.infer(obs)
         dt = time.time() - t0
         _log_action(actions, dt)
+        np.save(os.path.join(output_dir, f"actions_chunk_{chunk_idx:03d}.npy"), actions)
+        all_actions.append(actions)
+
+    # Save all actions as a single file for easy loading
+    np.save(os.path.join(output_dir, "all_actions.npy"), np.stack(all_actions))
+    logging.info(f"Saved {len(all_actions)} action arrays to {output_dir}/")
 
     # Reset triggers video save on the server
     logging.info("Sending reset to save video...")
@@ -310,6 +323,11 @@ def main():
         action="store_true",
         help="Use zero dummy images instead of real video frames (legacy mode)",
     )
+    parser.add_argument(
+        "--output-dir",
+        default="debug_output",
+        help="Directory to save predicted actions for later GT-cond replay (default: debug_output)",
+    )
 
     args = parser.parse_args()
 
@@ -324,6 +342,7 @@ def main():
         num_chunks=args.num_chunks,
         prompt=args.prompt,
         use_zero_images=args.use_zero_images,
+        output_dir=args.output_dir,
     )
 
 

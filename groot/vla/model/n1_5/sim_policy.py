@@ -676,10 +676,12 @@ class GrootSimPolicy(BaseGrootSimPolicy):
 
         # 3. Model inference
         with torch.inference_mode():
-            # with maybe_autocast:
             model_pred = self.trained_model.lazy_joint_video_action_causal(normalized_input, latent_video=latent_video)
         normalized_action = model_pred["action_pred"].float()
         video_pred = model_pred["video_pred"]
+
+        # Cache normalized action for potential GT-cond replay
+        self._last_normalized_action = normalized_action.detach().cpu()
 
         model_time = time.perf_counter() - model_start_time
 
@@ -708,6 +710,9 @@ class GrootSimPolicy(BaseGrootSimPolicy):
     
     def lazy_joint_forward_causal_gt_cond(self, batch, video=None, latent_video=None, state=None, **kwargs):
         
+        # 0. Extract gt_actions before transform (transform drops unknown keys)
+        gt_actions = batch.obs.pop("gt_actions", None)
+
         # 1. Check if input is batched and add batch dimension if needed
         is_batched = self._check_state_is_batched(batch.obs)
         if not is_batched:
@@ -719,6 +724,15 @@ class GrootSimPolicy(BaseGrootSimPolicy):
 
         if isinstance(normalized_input, Batch):
             normalized_input = normalized_input.__getstate__()
+
+        # Re-inject gt_actions (already normalized to [-1, 1]) after transform
+        if gt_actions is not None:
+            if isinstance(gt_actions, np.ndarray):
+                gt_actions = torch.from_numpy(gt_actions)
+            if gt_actions.ndim == 2:
+                gt_actions = gt_actions.unsqueeze(0)
+            device = next(iter(v for v in normalized_input.values() if torch.is_tensor(v))).device
+            normalized_input["gt_actions"] = gt_actions.to(device=device, dtype=torch.bfloat16)
 
         if video is not None:
             for key in normalized_input:
@@ -732,7 +746,6 @@ class GrootSimPolicy(BaseGrootSimPolicy):
 
         # 3. Model inference
         with torch.inference_mode():
-            # with maybe_autocast:
             model_pred = self.trained_model.lazy_joint_video_action_causal_gt_cond(normalized_input, latent_video=latent_video)
         normalized_action = model_pred["action_pred"].float()
         video_pred = model_pred["video_pred"]
@@ -862,6 +875,9 @@ class GrootSimPolicy(BaseGrootSimPolicy):
 
     def gt_video_action_pred(self, batch, video=None, state=None, **kwargs):
 
+        # 0. Extract gt_actions before transform (transform drops unknown keys)
+        gt_actions = batch.obs.pop("gt_actions", None)
+
         # 1. Check if input is batched and add batch dimension if needed
         is_batched = self._check_state_is_batched(batch.obs)
         if not is_batched:
@@ -873,6 +889,15 @@ class GrootSimPolicy(BaseGrootSimPolicy):
 
         if isinstance(normalized_input, Batch):
             normalized_input = normalized_input.__getstate__()
+
+        # Re-inject gt_actions (already normalized to [-1, 1]) after transform
+        if gt_actions is not None:
+            if isinstance(gt_actions, np.ndarray):
+                gt_actions = torch.from_numpy(gt_actions)
+            if gt_actions.ndim == 2:
+                gt_actions = gt_actions.unsqueeze(0)
+            device = next(iter(v for v in normalized_input.values() if torch.is_tensor(v))).device
+            normalized_input["gt_actions"] = gt_actions.to(device=device, dtype=torch.bfloat16)
 
         if video is not None:
             for key in normalized_input:
@@ -886,7 +911,6 @@ class GrootSimPolicy(BaseGrootSimPolicy):
 
         # 3. Model inference
         with torch.inference_mode():
-            # with maybe_autocast:
             model_pred = self.trained_model.gt_video_action_pred(normalized_input)
         normalized_action = model_pred["action_pred"].float()
         video_pred = model_pred["video_pred"]

@@ -268,6 +268,11 @@ class ARDroidRoboarenaPolicy:
         # Convert observation format
         converted_obs = self._convert_observation(obs)
         
+        # Check if GT-conditioned mode is requested
+        gt_actions = obs.get("gt_actions", None)
+        if gt_actions is not None:
+            converted_obs["gt_actions"] = gt_actions
+        
         # Signal workers to continue (0 = continue)
         signal_tensor = torch.zeros(1, dtype=torch.int32, device='cpu')
         dist.broadcast(signal_tensor, src=0, group=self._signal_group)
@@ -281,7 +286,11 @@ class ARDroidRoboarenaPolicy:
         # Distributed forward pass
         dist.barrier()
         with torch.no_grad():
-            result_batch, video_pred = self._policy.lazy_joint_forward_causal(batch)
+            if gt_actions is not None:
+                logger.info("GT-conditioned inference mode")
+                result_batch, video_pred = self._policy.lazy_joint_forward_causal_gt_cond(batch)
+            else:
+                result_batch, video_pred = self._policy.lazy_joint_forward_causal(batch)
         dist.barrier()
         
         # Store video predictions for potential saving
@@ -298,12 +307,54 @@ class ARDroidRoboarenaPolicy:
         
         action = self._convert_action(action_dict)
         
+        # Save debug artifacts (input images + predicted action)
+        self._save_debug_artifacts(converted_obs, action)
+        
         # Update first call flag
         if self._is_first_call:
             self._is_first_call = False
         
         return action
     
+    def _save_debug_artifacts(self, converted_obs: dict, action: np.ndarray) -> None:
+        """Save input images and predicted actions for debugging / GT-cond replay."""
+        if not self._output_dir:
+            return
+        try:
+            debug_dir = os.path.join(self._output_dir, "debug", f"{self._msg_index:06d}")
+            os.makedirs(debug_dir, exist_ok=True)
+
+            # Save predicted action (roboarena format)
+            np.save(os.path.join(debug_dir, "actions.npy"), action)
+
+            # Save normalized action (model-internal format) for GT-cond replay
+            if hasattr(self._policy, '_last_normalized_action') and self._policy._last_normalized_action is not None:
+                np.save(
+                    os.path.join(debug_dir, "normalized_actions.npy"),
+                    self._policy._last_normalized_action.numpy(),
+                )
+
+            # Save input images
+            img_dir = os.path.join(debug_dir, "input_images")
+            os.makedirs(img_dir, exist_ok=True)
+            for key in ("video.exterior_image_1_left", "video.exterior_image_2_left", "video.wrist_image_left"):
+                if key not in converted_obs:
+                    continue
+                arr = np.asarray(converted_obs[key])
+                if arr.ndim == 4:
+                    for fi in range(arr.shape[0]):
+                        imageio.imwrite(
+                            os.path.join(img_dir, f"{key.replace('.', '_')}_f{fi:02d}.png"),
+                            arr[fi] if arr[fi].dtype == np.uint8 else arr[fi].astype(np.uint8),
+                        )
+                elif arr.ndim == 3:
+                    imageio.imwrite(
+                        os.path.join(img_dir, f"{key.replace('.', '_')}.png"),
+                        arr if arr.dtype == np.uint8 else arr.astype(np.uint8),
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to save debug artifacts: {e}")
+
     def _reset_state(self, save_video: bool = True) -> None:
         """Internal method to reset policy state.
         
@@ -498,12 +549,15 @@ class WebsocketPolicyServer:
                     continue
 
                 # Receive the batch data via broadcast/gather mechanism
-                # This is a simplified version - the actual obs structure needs to be broadcasted
                 batch = self._receive_batch_from_rank0()
+                has_gt_actions = "gt_actions" in batch.obs
                 # Participate in distributed forward pass
                 dist.barrier()
                 with torch.no_grad():
-                    result_batch, video_pred = self._policy.lazy_joint_forward_causal(batch)
+                    if has_gt_actions:
+                        result_batch, video_pred = self._policy.lazy_joint_forward_causal_gt_cond(batch)
+                    else:
+                        result_batch, video_pred = self._policy.lazy_joint_forward_causal(batch)
                 dist.barrier()
 
             except Exception as e:

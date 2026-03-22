@@ -243,3 +243,6 @@ groot/control/envs/yam/data/eval/*
 /data
 
 checkpoints/
+debug_image/
+debug_output/
+
